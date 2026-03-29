@@ -1,0 +1,77 @@
+name: Deploy to Render
+
+# ✅ NON-AUTOMATED: Only runs when you manually trigger it from GitHub Actions tab
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for deployment (optional)"
+        required: false
+        default: "Manual deploy"
+
+jobs:
+  deploy:
+    name: Trigger Render Deployment
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1: Check out your code
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Step 2: Log deploy info for audit trail
+      - name: Log Deploy Info
+        run: |
+          echo "🚀 Deploying portfolio to Render"
+          echo "Triggered by : ${{ github.actor }}"
+          echo "Reason       : ${{ github.event.inputs.reason }}"
+          echo "Branch       : ${{ github.ref_name }}"
+          echo "Commit SHA   : ${{ github.sha }}"
+
+      # Step 3: Call Render's Deploy API
+      - name: Trigger Render Deploy
+        run: |
+          RESPONSE=$(curl -s -o /tmp/render_response.json -w "%{http_code}" \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            --data '{"clearCache": false}')
+
+          echo "HTTP Status: $RESPONSE"
+          cat /tmp/render_response.json
+
+          if [ "$RESPONSE" -ne 201 ]; then
+            echo "❌ Render deploy trigger failed with HTTP status $RESPONSE"
+            exit 1
+          else
+            echo "✅ Render deploy triggered successfully!"
+          fi
+
+      # Step 4: Poll until deployment is live or failed
+      - name: Wait for Deployment to Complete
+        run: |
+          echo "⏳ Polling Render for deploy status..."
+          DEPLOY_ID=$(cat /tmp/render_response.json | python3 -c "import sys, json; print(json.load(sys.stdin)['id'])")
+          echo "Deploy ID: $DEPLOY_ID"
+
+          for i in $(seq 1 20); do
+            sleep 15
+            STATUS=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/$DEPLOY_ID" \
+              | python3 -c "import sys, json; print(json.load(sys.stdin).get('status', 'unknown'))")
+
+            echo "Attempt $i / 20 — Status: $STATUS"
+
+            if [ "$STATUS" = "live" ]; then
+              echo "🎉 Deployment is LIVE!"
+              exit 0
+            elif [ "$STATUS" = "deactivated" ] || [ "$STATUS" = "build_failed" ]; then
+              echo "❌ Deployment failed with status: $STATUS"
+              exit 1
+            fi
+          done
+
+          echo "⚠️ Timed out after 5 minutes. Check your Render dashboard."
+          exit 1
